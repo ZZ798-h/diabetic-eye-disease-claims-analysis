@@ -1,0 +1,499 @@
+---
+title: "Project_dataclean"
+author: "Zhan_Zhao"
+date: "2026-3-31"
+output: 
+  html_document:
+    theme: cerulean
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+## Task Description
+
+This R Markdown document reads, cleans, and explores the datasets used for the final project.  
+It focuses on diagnosed diabetic eye disease in a commercially insured population and examines variation across risk-factor subgroups.  
+It also incorporates state-level behavioral indicators from BRFSS to provide additional context.  
+
+
+The main tasks are:
+
+1) load and inspect the primary and supplementary datasets  
+2) identify and define the primary diabetic eye disease outcome  
+3) clean and simplify both datasets for state-level analysis  
+4) select behavioral indicators from BRFSS and reshape them into a state-year summary file  
+5) join the two datasets at the state-year level  
+6) create descriptive summaries and exploratory visualizations  
+7) document preliminary patterns for later discussion of limitations and future work  
+
+
+# Initialize
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      message = FALSE,
+                      fig.width = 8,
+                      fig.height = 6) 
+#```{r message = TRUE}
+# code that you want to run and then the message to display
+library(tidyverse)
+library(readr)
+library(janitor)
+```
+
+# define data directories
+```{r}
+project.dir <- "/Users/zhaozhan/Project"
+data.dir <- file.path(project.dir, "01 Data")
+output.dir <- file.path(project.dir, "02 Output")
+
+mscan.file <- file.path(
+  data.dir,
+  "Commercial_Medical_Insurance_(MSCANCC)_-_Vision_and_Eye_Health_Surveillance_20260331.csv"
+)
+
+brfss.file <- file.path(
+  data.dir,
+  "Nutrition,_Physical_Activity,_and_Obesity_-_Behavioral_Risk_Factor_Surveillance_System_20260331.csv"
+)
+```
+
+# Load and Inspect the Primary Dataset
+```{r Load_and_inspect_primary_dataset}
+#load_mscan
+mscan <- read_csv(mscan.file, show_col_types = FALSE) |>
+  clean_names()
+
+glimpse(mscan)
+#insert_mscan_questions
+mscan |>
+  count(topic, sort = TRUE)
+
+mscan |>
+  count(question, sort = TRUE) |>
+  print(n = 50)
+
+#insert_diabetic_eye_question
+mscan |>
+  filter(question == "Annual prevalence of diagnosed diabetic eye diseases") |>
+  count(response, sort = TRUE)
+
+# Build the Primary Analytic Subset
+
+diab_eye_state <- mscan |>
+  filter(
+    question == "Annual prevalence of diagnosed diabetic eye diseases",
+    response == "All Diabetic eye diseases",
+    geographic_level == "State",
+    age == "All ages",
+    sex == "Both sexes",
+    race_ethnicity == "All races",
+    risk_factor == "Diabetes",
+    risk_factor_response == "Yes"
+  ) |>
+  transmute( 
+    # select variables and rename it
+    year_start,
+    state_abbr,
+    location_desc,
+    response,
+    diab_eye_prev = data_value,
+    diab_eye_lcl = low_confidence_limit,
+    diab_eye_ucl = high_confidence_limit,
+    sample_size,
+    numerator
+  )
+
+glimpse(diab_eye_state)
+
+head(diab_eye_state)
+
+diab_eye_state |>
+  count(year_start, sort = TRUE)
+
+diab_eye_state |>
+  count(state_abbr, sort = TRUE)
+```
+
+# Load and Inspect the Supplementary Dataset
+```{r Load_and_inspect_supplementary_dataset}
+#load brfss
+brfss <- read_csv(brfss.file, show_col_types = FALSE) |>
+  clean_names()
+
+glimpse(brfss)
+
+#insert brfss
+brfss |>
+  count(topic, sort = TRUE)
+
+brfss |>
+  count(question, sort = TRUE) |>
+  print(n = 100)
+
+#Select BRFSS behavioral indicators
+brfss_selected <- brfss |>
+  filter(
+    question %in% c(
+      "Percent of adults aged 18 years and older who have obesity",
+      "Percent of adults who engage in no leisure-time physical activity"
+    )
+  )
+
+brfss_selected |>
+  count(question, stratification_category1, sort = TRUE) |>
+  print(n = 100)
+
+#Bulid brafss_state
+brfss_state <- brfss_selected |>
+  filter(stratification_category1 == "Total") |>
+  select(
+    year_start, location_abbr, location_desc,
+    question, data_value,
+    low_confidence_limit, high_confidence_limit,
+    sample_size
+  )
+
+brfss_wide <- brfss_state |>
+  mutate(
+    behavior_indicator = case_when(
+      question == "Percent of adults aged 18 years and older who have obesity" ~ "obesity_pct",
+      question == "Percent of adults who engage in no leisure-time physical activity" ~ "inactive_pct",
+      TRUE ~ NA_character_
+    )
+  ) |>
+  select(year_start, location_abbr, behavior_indicator, data_value) |>
+  pivot_wider(
+    names_from = behavior_indicator,
+    values_from = data_value
+  )
+
+glimpse(brfss_wide)
+head(brfss_wide)
+
+```
+
+# Join the Two Datasets
+```{r Join_the_two_datasets}
+# Join data
+joined_data <- diab_eye_state |>
+  left_join(
+    brfss_wide,
+    by = c("state_abbr" = "location_abbr", "year_start" = "year_start")
+  )
+
+glimpse(joined_data)
+head(joined_data)
+
+# Join quality summary
+joined_data |>
+  summarise(
+    n_rows = n(),
+    n_states = n_distinct(state_abbr),
+    n_years = n_distinct(year_start),
+    missing_obesity = sum(is.na(obesity_pct)),
+    missing_inactive = sum(is.na(inactive_pct)),
+    complete_cases = sum(!is.na(diab_eye_prev) & !is.na(obesity_pct) & !is.na(inactive_pct))
+  )
+
+# Check unmatched or incomplete records
+joined_data |>
+  filter(is.na(obesity_pct) | is.na(inactive_pct)) |>
+  select(year_start, state_abbr, location_desc, obesity_pct, inactive_pct)
+
+# Create complete-case analytic dataset
+analysis_data <- joined_data |>
+  drop_na(diab_eye_prev, obesity_pct, inactive_pct)
+
+glimpse(analysis_data)
+head(analysis_data)
+```
+
+# Data display
+```{r Plot}
+# Helper function to compute regression labels for plot annotations
+
+build_lm_label <- function(df, x_var, y_var = "diab_eye_prev") {
+  model_data <- df |>
+    select(all_of(c(x_var, y_var))) |>
+    drop_na()
+  fit <- lm(reformulate(x_var, y_var), data = model_data)
+  fit_summary <- summary(fit)
+  # coef
+  fit_coef <- coef(fit_summary)
+  # 95% CI
+  fit_ci <- confint(fit)
+  slope_name <- x_var
+  #slope value
+  slope_est <- fit_coef[slope_name, "Estimate"]
+  # P-value
+  slope_p <- fit_coef[slope_name, "Pr(>|t|)"]
+  # low ci
+  slope_ci_low <- fit_ci[slope_name, 1]
+  #high ci
+  slope_ci_high <- fit_ci[slope_name, 2]
+  r_sq <- fit_summary$r.squared
+  paste0(
+    "R² = ", sprintf("%.3f", r_sq),
+    "\nSlope = ", sprintf("%.3f", slope_est),
+    "\n95% CI = [", sprintf("%.3f", slope_ci_low), ", ", sprintf("%.3f", slope_ci_high), "]",
+    "\np-value = ", format.pval(slope_p, digits = 3, eps = 0.001)
+  )
+}
+
+# Build model labels
+obesity_label <- build_lm_label(analysis_data, "obesity_pct")
+inactive_label <- build_lm_label(analysis_data, "inactive_pct")
+
+# Fit simple linear regression models
+obesity_fit <- lm(diab_eye_prev ~ obesity_pct, data = analysis_data)
+inactive_fit <- lm(diab_eye_prev ~ inactive_pct, data = analysis_data)
+
+# Figure 1: State-level prevalence
+p_state <- ggplot(
+  analysis_data,
+  aes(x = reorder(state_abbr, diab_eye_prev), y = diab_eye_prev, fill = diab_eye_prev)
+) +
+  geom_col(color = "gray25", alpha = 0.9) +
+  coord_flip() +
+  scale_fill_gradient(
+    low = "#9ecae1",
+    high = "#08519c",
+    name = "Prevalence (%)"
+  ) +
+  labs(
+    title = "State-Level Prevalence of Diagnosed Diabetic Eye Disease",
+    x = "State",
+    y = "Crude prevalence (%)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+p_state
+
+ggsave(
+  file.path(output.dir, "figure1_state_prevalence.png"),
+  plot = p_state,
+  width = 9,
+  height = 7,
+  dpi = 300
+)
+
+# Figure 2: Obesity and diabetic eye disease
+p_obesity <- ggplot(analysis_data, aes(x = obesity_pct, y = diab_eye_prev)) +
+  geom_point(color = "#2b8cbe", size = 2.5, alpha = 0.75) +
+  geom_smooth(method = "lm", se = TRUE, color = "#de2d26", fill = "#fcae91", linewidth = 1) +
+  annotate(
+    "label",
+    x = Inf, y = Inf,
+    label = obesity_label,
+    hjust = 1.05,
+    vjust = 1.1,
+    size = 3.3,
+    label.size = 0.2
+  ) +
+  labs(
+    title = "State-Level Obesity and Diagnosed Diabetic Eye Disease",
+    x = "Obesity prevalence (%)",
+    y = "Diagnosed diabetic eye disease prevalence (%)",
+    subtitle = "Linear fit with 95% confidence interval"
+  ) +
+  theme_minimal()
+
+p_obesity
+
+ggsave(
+  file.path(output.dir, "figure2_obesity_association.png"),
+  plot = p_obesity,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# Short interpretation for obesity model
+obesity_coef <- summary(obesity_fit)$coefficients
+obesity_ci <- confint(obesity_fit)
+
+cat(
+  "**Interpretation (Obesity):** A 1 percentage-point increase in state-level adult obesity prevalence was associated with an estimated ",
+  sprintf("%.3f", obesity_coef["obesity_pct", "Estimate"]),
+  " percentage-point change in diagnosed diabetic eye disease prevalence (95% CI: ",
+  sprintf("%.3f", obesity_ci["obesity_pct", 1]), ", ",
+  sprintf("%.3f", obesity_ci["obesity_pct", 2]),
+  "; p-value ", format.pval(obesity_coef["obesity_pct", "Pr(>|t|)"], digits = 3, eps = 0.001),
+  "). This ecological association should not be interpreted as an individual-level causal relationship.\n\n",
+  sep = ""
+
+)
+
+# Figure 3: Physical inactivity and diabetic eye disease
+p_inactive <- ggplot(analysis_data, aes(x = inactive_pct, y = diab_eye_prev)) +
+  geom_point(color = "#31a354", size = 2.5, alpha = 0.75) +
+  geom_smooth(method = "lm", se = TRUE, color = "#756bb1", fill = "#dadaeb", linewidth = 1) +
+  annotate(
+    "label",
+    x = Inf,
+    y = Inf,
+    label = inactive_label,
+    hjust = 1.05,
+    vjust = 1.1,
+    size = 3.3,
+    label.size = 0.2
+  ) +
+  labs(
+    title = "Physical Inactivity and Diagnosed Diabetic Eye Disease",
+    x = "No leisure-time physical activity (%)",
+    y = "Diagnosed diabetic eye disease prevalence (%)",
+    subtitle = "Linear fit with 95% confidence interval"
+  ) +
+  theme_minimal()
+
+p_inactive
+ggsave(
+  file.path(output.dir, "figure3_inactivity_association.png"),
+  plot = p_inactive,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# Short interpretation for physical inactivity model
+inactive_coef <- summary(inactive_fit)$coefficients
+inactive_ci <- confint(inactive_fit)
+
+cat(
+  "**Interpretation (Physical inactivity):** A 1 percentage-point increase in state-level physical inactivity prevalence was associated with an estimated ",
+  sprintf("%.3f", inactive_coef["inactive_pct", "Estimate"]),
+  " percentage-point change in diagnosed diabetic eye disease prevalence (95% CI: ",
+  sprintf("%.3f", inactive_ci["inactive_pct", 1]), ", ",
+  sprintf("%.3f", inactive_ci["inactive_pct", 2]),
+  "; p-value ", format.pval(inactive_coef["inactive_pct", "Pr(>|t|)"], digits = 3, eps = 0.001),
+  "). This ecological association should not be interpreted as an individual-level causal relationship.\n",
+  sep = ""
+)
+```
+
+# Correlation Analysis & Heatmap
+```{r Correlation-Heatmap}
+# Correlation heatmap for final analytic variables
+
+#Create complete-case data for correlation analysis
+
+cor_data <- analysis_data |>
+  select(
+    diab_eye_prev,
+    obesity_pct,
+    inactive_pct
+  ) |>
+  drop_na()
+
+#Rename Variables for clearer plot labels
+cor_data_labeled <- cor_data |>
+  rename(
+    `Diagnosed diabetic eye disease` = diab_eye_prev,
+    `Adult obesity` = obesity_pct,
+    `Physical inactivity` = inactive_pct
+  )
+
+#Create Pearson correlation matirx
+
+corr_mat <- round(
+  cor(
+    cor_data_labeled,
+    use = "complete.obs",
+    method = "pearson"),
+  2
+)
+
+corr_mat
+
+#convert correlation matrix to long format
+corr_heatmap_data <- as.data.frame(as.table(corr_mat)) |>
+  rename(
+    variable_1 = Var1,
+    variable_2 = Var2,
+    correlation = Freq
+  )
+
+#Figure4: Correlation heatmap
+p_corr_heatmap <- ggplot(
+  corr_heatmap_data,
+  aes(
+    x = variable_1,
+    y = variable_2,
+    fill = correlation)
+  )+
+    geom_tile(color = "white")+
+    geom_text(
+      aes(
+        label = sprintf("%.2f",correlation)),
+        color = "black",
+        size = 4
+      )+
+    scale_fill_gradient2(
+      low = "#b2182b",
+      mid = "white",
+      high = "#2166ac",
+      midpoint = 0,
+      limits = c(-1,1),
+      name = "Pearson r"
+    )+
+    labs(
+      title = "Correlation Heatmap of Diabetic Eye Disease and Behavioral Indicators",
+      x = "",
+      y = ""
+    )+
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    panel.grid = element_blank()
+  )
+
+p_corr_heatmap
+
+ggsave(
+  file.path(output.dir, "figure4_correlation_heatmap.png"),
+  plot = p_corr_heatmap,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# Correlation tests with p-values
+
+cor_obesity <- cor.test(
+  analysis_data$diab_eye_prev,
+  analysis_data$obesity_pct,
+  method = "pearson"
+)
+
+cor_inactive <- cor.test(
+  analysis_data$diab_eye_prev,
+  analysis_data$inactive_pct,
+  method = "pearson"
+)
+
+cor_summary <- tibble(
+  predictor = c("Adult obesity", "Physical inactivity"),
+  correlation_r = c(
+    unname(cor_obesity$estimate),
+    unname(cor_inactive$estimate)
+  ),
+  p_value = c(
+    cor_obesity$p.value,
+    cor_inactive$p.value
+  )
+)
+
+cor_summary
+
+write_csv(
+  cor_summary,
+  file.path(output.dir, "correlation_summary.csv")
+)
+```
+
+
+
+
+

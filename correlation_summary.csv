@@ -1,0 +1,3 @@
+predictor,correlation_r,p_value
+Adult obesity,-0.3233983494940268,0.0019926515526904848
+Physical inactivity,-0.3757532228060638,2.84893876521789e-4
